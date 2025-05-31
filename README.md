@@ -47,10 +47,8 @@ EBus resolves handlers and behaviors at runtime using generic interfaces and C# 
      services.AddEBus(Assembly.GetExecutingAssembly());
      ```  
    - Scans for all `IRequestHandler<,>`, `INotificationHandler<>`, and `IPipelineBehavior<,>`.  
-5. **No Hard-coded Method Names**  
-   - Uses `dynamic` to invoke handler methods at runtime—no `GetMethod("Handle")`.  
-6. **Lightweight & No External Dependencies**  
-   - Built purely on `Microsoft.Extensions.DependencyInjection` and .NET Standard (or .NET Core/6/7/8).  
+5. **Lightweight & No External Dependencies**  
+   - Built purely on `Microsoft.Extensions.DependencyInjection` and .NET Core 9.  
 
 ---
 
