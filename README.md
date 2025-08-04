@@ -24,8 +24,6 @@ EBus resolves handlers and behaviors at runtime using generic interfaces and C# 
   - [Sending a Request](#sending-a-request)  
   - [Publishing a Notification](#publishing-a-notification)  
   - [Registering Multiple Assemblies](#registering-multiple-assemblies)  
-- [Packaging & Publishing](#packaging--publishing)  
-- [Versioning & Maintenance](#versioning--maintenance)  
 - [Contributing](#contributing)  
 - [License](#license)  
 

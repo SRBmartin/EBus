@@ -11,8 +11,9 @@ namespace EBus.Registration;
 public static class ServiceCollectionExtensions
 {
     /// <summary>
-    /// Scans the given assemblies, registers all IRequestHandler<,>, INotificationHandler<>, 
-    /// and IPipelineBehavior<,> implementations, and registers the EBus Mediator itself.
+    /// Scan *exactly* the assemblies you pass in, register all IRequestHandler<,>,
+    /// INotificationHandler<>, and IPipelineBehavior<,> found in those assemblies,
+    /// then register the EBus Mediator itself.
     /// </summary>
     /// <param name="services">The IServiceCollection to add to.</param>
     /// <param name="assemblies">
@@ -22,15 +23,50 @@ public static class ServiceCollectionExtensions
     /// <returns>The IServiceCollection, for chaining.</returns>
     public static IServiceCollection AddEBus(this IServiceCollection services, params Assembly[] assemblies)
     {
-        if (assemblies == null || assemblies.Length == 0) throw new ArgumentException("You must provide at least one assembly to scan.", nameof(assemblies));
+        if (assemblies == null || assemblies.Length == 0)
+            throw new ArgumentException("You must provide at least one assembly to scan.", nameof(assemblies));
 
         services.AddTransient<IMediator, Mediator>();
 
         RegisterRequestHandlers(services, assemblies);
         RegisterNotificationHandlers(services, assemblies);
-        RegisterPipelineBehaviours(services, assemblies);
+        RegisterPipelineBehaviors(services, assemblies);
 
         return services;
+    }
+
+    /// <summary>
+    /// Scan the entry assembly plus all of its referenced assemblies,
+    /// registers all IRequestHandler<,>, INotificationHandler<>, and IPipelineBehavior<,> implementations
+    /// found in those assemblies, and then registers the EBus Mediator itself.
+    /// </summary>
+    public static IServiceCollection AddEBus(this IServiceCollection services)
+    {
+        var entryAssembly = Assembly.GetEntryAssembly();
+        if (entryAssembly == null)
+            throw new InvalidOperationException("Could not determine entry assembly.");
+
+        var toScan = new List<Assembly> { entryAssembly };
+
+        foreach (var asmName in entryAssembly.GetReferencedAssemblies())
+        {
+            try
+            {
+                var loaded = Assembly.Load(asmName);
+                toScan.Add(loaded);
+            }
+            catch
+            {
+                // If it fails to load, ignore (e.g. dynamic or unrelated system assemblies)
+            }
+        }
+
+        var distinct = toScan
+            .Where(a => a != null)
+            .Distinct()
+            .ToArray();
+
+        return services.AddEBus(distinct);
     }
 
     private static void RegisterRequestHandlers(IServiceCollection services, Assembly[] assemblies)
@@ -75,21 +111,21 @@ public static class ServiceCollectionExtensions
         }
     }
 
-    private static void RegisterPipelineBehaviours(IServiceCollection services, Assembly[] assemblies)
+    private static void RegisterPipelineBehaviors(IServiceCollection services, Assembly[] assemblies)
     {
         var openInterfaceType = typeof(IPipelineBehaviour<,>);
 
-        foreach (var assembbly in assemblies)
+        foreach (var assembly in assemblies)
         {
-            var types = assembbly
+            var implementations = assembly
                 .GetTypes()
                 .Where(t => !t.IsInterface && !t.IsAbstract)
                 .SelectMany(t => t.GetInterfaces()
-                    .Where(i => i.IsGenericType &&
-                           i.GetGenericTypeDefinition() == openInterfaceType)
-                    .Select(i => new { Implementation = t, Service = i })
-                );
-            foreach (var pair in types)
+                    .Where(i => i.IsGenericType
+                                && i.GetGenericTypeDefinition() == openInterfaceType)
+                    .Select(i => new { Service = i, Implementation = t }));
+
+            foreach (var pair in implementations)
             {
                 services.AddTransient(pair.Service, pair.Implementation);
             }
