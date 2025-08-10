@@ -28,9 +28,9 @@ public static class ServiceCollectionExtensions
 
         services.AddTransient<IMediator, Mediator>();
 
-        RegisterRequestHandlers(services, assemblies);
-        RegisterNotificationHandlers(services, assemblies);
-        RegisterPipelineBehaviors(services, assemblies);
+        RegisterHandlers(services, assemblies, typeof(IRequestHandler<,>));
+        RegisterHandlers(services, assemblies, typeof(INotificationHandler<>));
+        RegisterBehaviours(services, assemblies, typeof(IPipelineBehaviour<,>));
 
         return services;
     }
@@ -94,33 +94,65 @@ public static class ServiceCollectionExtensions
             || n is "mscorlib" or "netstandard" or "WindowsBase" or "PresentationCore" or "PresentationFramework";
     }
 
-    private static void RegisterRequestHandlers(IServiceCollection services, Assembly[] assemblies)
-        => RegisterOpenGeneric(services, assemblies, typeof(IRequestHandler<,>));
-
-    private static void RegisterNotificationHandlers(IServiceCollection services, Assembly[] assemblies)
-        => RegisterOpenGeneric(services, assemblies, typeof(INotificationHandler<>));
-
-    private static void RegisterPipelineBehaviors(IServiceCollection services, Assembly[] assemblies)
-        => RegisterOpenGeneric(services, assemblies, typeof(IPipelineBehaviour<,>));
-
-    private static void RegisterOpenGeneric(IServiceCollection services, Assembly[] assemblies, Type openInterfaceType)
+    private static void RegisterHandlers(IServiceCollection services, Assembly[] assemblies, Type openInterface)
     {
         var registered = new HashSet<(Type Service, Type Impl)>();
 
-        foreach (var assembly in assemblies)
+        foreach (var asm in assemblies)
         {
             Type[] types;
-            try { types = assembly.GetTypes(); }
-            catch (ReflectionTypeLoadException ex) { types = ex.Types.Where(t => t != null).ToArray()!; }
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types!.Where(t => t is not null)!.ToArray()!; }
 
             foreach (var impl in types.Where(t => t is { IsInterface: false, IsAbstract: false }))
             {
-                foreach (var service in impl.GetInterfaces()
-                             .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == openInterfaceType))
+                foreach (var itface in impl.GetInterfaces().Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == openInterface))
                 {
-                    var pair = (Service: service, Impl: impl);
-                    if (registered.Add(pair))
-                        services.AddTransient(service, impl);
+                    if (impl.IsGenericTypeDefinition)
+                    {
+                        var pair = (openInterface, impl);
+                        if (registered.Add(pair)) services.AddTransient(openInterface, impl);
+                    }
+                    else if (!itface.ContainsGenericParameters)
+                    {
+                        var pair = (itface, impl);
+                        if (registered.Add(pair)) services.AddTransient(itface, impl);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void RegisterBehaviours(IServiceCollection services, Assembly[] assemblies, Type openInterface)
+    {
+        var registered = new HashSet<(Type Service, Type Impl)>();
+
+        foreach (var asm in assemblies)
+        {
+            Type[] types;
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types!.Where(t => t is not null)!.ToArray()!; }
+
+            foreach (var impl in types.Where(t => t is { IsInterface: false, IsAbstract: false }))
+            {
+                var matches = impl.GetInterfaces().Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == openInterface);
+
+                foreach (var _ in matches)
+                {
+                    if (impl.IsGenericTypeDefinition)
+                    {
+                        var pair = (Service: openInterface, Impl: impl);
+                        if (registered.Add(pair)) services.AddTransient(openInterface, impl);
+                    }
+                    else
+                    {
+                        foreach (var closed in impl.GetInterfaces()
+                                   .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == openInterface && !i.ContainsGenericParameters))
+                        {
+                            var pair = (Service: closed, Impl: impl);
+                            if (registered.Add(pair)) services.AddTransient(closed, impl);
+                        }
+                    }
                 }
             }
         }
