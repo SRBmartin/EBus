@@ -28,9 +28,9 @@ public static class ServiceCollectionExtensions
 
         services.AddTransient<IMediator, Mediator>();
 
-        RegisterRequestHandlers(services, assemblies);
-        RegisterNotificationHandlers(services, assemblies);
-        RegisterPipelineBehaviors(services, assemblies);
+        RegisterHandlers(services, assemblies, typeof(IRequestHandler<,>));
+        RegisterHandlers(services, assemblies, typeof(INotificationHandler<>));
+        RegisterBehaviours(services, assemblies, typeof(IPipelineBehaviour<,>));
 
         return services;
     }
@@ -42,92 +42,118 @@ public static class ServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddEBus(this IServiceCollection services)
     {
-        var entryAssembly = Assembly.GetEntryAssembly();
-        if (entryAssembly == null)
-            throw new InvalidOperationException("Could not determine entry assembly.");
+        var entry = Assembly.GetEntryAssembly() ?? throw new InvalidOperationException("Could not determine entry assembly.");
 
-        var toScan = new List<Assembly> { entryAssembly };
+        var toScan = GetTransitiveAssemblies(entry);
+        
+        var loaded = AppDomain.CurrentDomain.GetAssemblies();
+        var all = toScan.Concat(loaded).DistinctBy(a => a.FullName).ToArray();
 
-        foreach (var asmName in entryAssembly.GetReferencedAssemblies())
-        {
-            try
-            {
-                var loaded = Assembly.Load(asmName);
-                toScan.Add(loaded);
-            }
-            catch
-            {
-                // If it fails to load, ignore (e.g. dynamic or unrelated system assemblies)
-            }
-        }
-
-        var distinct = toScan
-            .Where(a => a != null)
-            .Distinct()
-            .ToArray();
-
-        return services.AddEBus(distinct);
+        return services.AddEBus(all);
     }
 
-    private static void RegisterRequestHandlers(IServiceCollection services, Assembly[] assemblies)
+    private static IEnumerable<Assembly> GetTransitiveAssemblies(Assembly root)
     {
-        var openInterfaceType = typeof(IRequestHandler<,>);
-
-        foreach (var assembly in assemblies)
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var q = new Queue<Assembly>();
+        void Enqueue(Assembly a)
         {
-            var types = assembly
-                .GetTypes()
-                .Where(t => !t.IsInterface && !t.IsAbstract)
-                .SelectMany(t => t.GetInterfaces()
-                    .Where(i => i.IsGenericType &&
-                                i.GetGenericTypeDefinition() == openInterfaceType)
-                    .Select(i => new { Implementation = t, Service = i})
-                );
-            foreach (var pair in types)
+            if (a?.FullName is null) return;
+            if (seen.Add(a.FullName)) q.Enqueue(a);
+        }
+
+        Enqueue(root);
+
+        while (q.Count > 0)
+        {
+            var asm = q.Dequeue();
+            yield return asm;
+
+            foreach (var an in asm.GetReferencedAssemblies())
             {
-                services.AddTransient(pair.Service, pair.Implementation);
+                if (IsSystemAssembly(an)) continue;
+
+                try
+                {
+                    var dep = Assembly.Load(an);
+                    Enqueue(dep);
+                }
+                catch
+                {
+                    // ignore load failures for irrelevant/dynamic assemblies
+                }
             }
         }
     }
 
-    private static void RegisterNotificationHandlers(IServiceCollection services, Assembly[] assemblies)
+    private static bool IsSystemAssembly(AssemblyName an)
     {
-        var openInterfaceType = typeof(INotificationHandler<>);
+        var n = an.Name ?? string.Empty;
+        return n.StartsWith("System", StringComparison.OrdinalIgnoreCase)
+            || n.StartsWith("Microsoft.", StringComparison.OrdinalIgnoreCase)
+            || n is "mscorlib" or "netstandard" or "WindowsBase" or "PresentationCore" or "PresentationFramework";
+    }
 
-        foreach (var assembly in assemblies)
+    private static void RegisterHandlers(IServiceCollection services, Assembly[] assemblies, Type openInterface)
+    {
+        var registered = new HashSet<(Type Service, Type Impl)>();
+
+        foreach (var asm in assemblies)
         {
-            var types = assembly
-                .GetTypes()
-                .Where(t => !t.IsInterface && !t.IsAbstract)
-                .SelectMany(t => t.GetInterfaces()
-                    .Where(i => i.IsGenericType &&
-                           i.GetGenericTypeDefinition() == openInterfaceType)
-                    .Select(i => new { Implementation = t, Service = i })
-                );
-            foreach (var pair in types)
+            Type[] types;
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types!.Where(t => t is not null)!.ToArray()!; }
+
+            foreach (var impl in types.Where(t => t is { IsInterface: false, IsAbstract: false }))
             {
-                services.AddTransient(pair.Service, pair.Implementation);
+                foreach (var itface in impl.GetInterfaces().Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == openInterface))
+                {
+                    if (impl.IsGenericTypeDefinition)
+                    {
+                        var pair = (openInterface, impl);
+                        if (registered.Add(pair)) services.AddTransient(openInterface, impl);
+                    }
+                    else if (!itface.ContainsGenericParameters)
+                    {
+                        var pair = (itface, impl);
+                        if (registered.Add(pair)) services.AddTransient(itface, impl);
+                    }
+                }
             }
         }
     }
 
-    private static void RegisterPipelineBehaviors(IServiceCollection services, Assembly[] assemblies)
+    private static void RegisterBehaviours(IServiceCollection services, Assembly[] assemblies, Type openInterface)
     {
-        var openInterfaceType = typeof(IPipelineBehaviour<,>);
+        var registered = new HashSet<(Type Service, Type Impl)>();
 
-        foreach (var assembly in assemblies)
+        foreach (var asm in assemblies)
         {
-            var implementations = assembly
-                .GetTypes()
-                .Where(t => !t.IsInterface && !t.IsAbstract)
-                .SelectMany(t => t.GetInterfaces()
-                    .Where(i => i.IsGenericType
-                                && i.GetGenericTypeDefinition() == openInterfaceType)
-                    .Select(i => new { Service = i, Implementation = t }));
+            Type[] types;
+            try { types = asm.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types!.Where(t => t is not null)!.ToArray()!; }
 
-            foreach (var pair in implementations)
+            foreach (var impl in types.Where(t => t is { IsInterface: false, IsAbstract: false }))
             {
-                services.AddTransient(pair.Service, pair.Implementation);
+                var matches = impl.GetInterfaces().Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == openInterface);
+
+                foreach (var _ in matches)
+                {
+                    if (impl.IsGenericTypeDefinition)
+                    {
+                        var pair = (Service: openInterface, Impl: impl);
+                        if (registered.Add(pair)) services.AddTransient(openInterface, impl);
+                    }
+                    else
+                    {
+                        foreach (var closed in impl.GetInterfaces()
+                                   .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == openInterface && !i.ContainsGenericParameters))
+                        {
+                            var pair = (Service: closed, Impl: impl);
+                            if (registered.Add(pair)) services.AddTransient(closed, impl);
+                        }
+                    }
+                }
             }
         }
     }
